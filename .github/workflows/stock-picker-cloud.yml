@@ -100,21 +100,53 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+       
         run: |
-          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-            echo '未设置 Telegram Secrets，跳过推送'
-            exit 0
-          fi
-          REPORT="data/reports/short_$(date +%Y%m%d)_briefing.md"
-          if [[ ! -f "$REPORT" ]]; then
-            echo '没有当日简报可发送，跳过推送（防止发送过期报告）'
-            exit 0
-          fi
-          curl --fail --silent --show-error --retry 1 \
-            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
-            -F "chat_id=${TELEGRAM_CHAT_ID}" \
-            -F "document=@${REPORT}" \
-            || echo 'Telegram 推送失败；可在 Actions Artifacts 中查看报告'
+          python - <<'PY'
+          import os
+          import re
+          import time
+          from pathlib import Path
+          import requests
+
+          token = os.environ.get("TELEGRAM_BOT_TOKEN")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+          if not token or not chat_id:
+              print("Telegram Secrets 未设置")
+              raise SystemExit(0)
+
+          reports = list(Path("data/reports").rglob("*_briefing.md"))
+          if not reports:
+              print("没有找到今日简报")
+              raise SystemExit(0)
+
+          latest = max(reports, key=lambda p: p.stat().st_mtime)
+          content = latest.read_text(encoding="utf-8").strip()
+
+          # 将常用 Markdown 标记转换为普通文本
+          content = re.sub(r"(?m)^#{1,6}\s*", "", content)
+          content = content.replace("**", "").replace("```", "")
+          content = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1（\2）", content)
+
+          # Telegram 单条消息有长度限制，自动拆分
+          chunks = [content[i:i+3500] for i in range(0, len(content), 3500)]
+
+          for index, chunk in enumerate(chunks, 1):
+              message = f"📈 A股每日选股报告（{index}/{len(chunks)}）\n\n{chunk}"
+              response = requests.post(
+                  f"https://api.telegram.org/bot{token}/sendMessage",
+                  data={"chat_id": chat_id, "text": message},
+                  timeout=30
+              )
+              response.raise_for_status()
+              if not response.json().get("ok"):
+                  raise RuntimeError(response.text)
+              time.sleep(1.1)
+
+          print("Telegram 文本推送完成")
+          PY
+
 
       - name: 保存数据库供下次自动运行恢复
         if: ${{ always() }}
